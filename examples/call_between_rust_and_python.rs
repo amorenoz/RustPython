@@ -1,5 +1,5 @@
 use rustpython::vm::{
-    pyclass, pymodule, PyObject, PyPayload, PyResult, TryFromBorrowedObject, VirtualMachine,
+    extend_module, pyclass, pymodule, builtins::PyDict, convert::ToPyObject, class::PyClassImpl, PyObjectRef, PyPayload, VirtualMachine,
 };
 
 pub fn main() {
@@ -8,7 +8,7 @@ pub fn main() {
         .init_hook(Box::new(|vm| {
             vm.add_native_module(
                 "rust_py_module".to_owned(),
-                Box::new(rust_py_module::make_module),
+                Box::new(make_rust_module),
             );
         }))
         .interpreter();
@@ -17,40 +17,41 @@ pub fn main() {
         vm.insert_sys_path(vm.new_pyobj("examples"))
             .expect("add path");
 
-        let module = vm.import("call_between_rust_and_python", None, 0).unwrap();
-        let init_fn = module.get_attr("python_callback", vm).unwrap();
-        init_fn.call((), vm).unwrap();
+        let module = vm.import("call_between_rust_and_python", None, 0).unwrap_or_else(|excp| {vm.print_exception(excp); panic!()});
 
-        let take_string_fn = module.get_attr("take_string", vm).unwrap();
-        take_string_fn
-            .call((String::from("Rust string sent to python"),), vm)
-            .unwrap();
+        // Call with payload
+        let init_fn2 = module.get_attr("python_callback2", vm).unwrap_or_else(|excp| {vm.print_exception(excp); panic!()});
+
+        let arg = other_module::RustStruct::new();
+        init_fn2.call(vec!(arg.to_pyobject(vm)), vm).unwrap_or_else(|excp| {vm.print_exception(excp); panic!()});
+
+        // Call with dict
+        let arg = PyDict::new_ref(vm.as_ref());
+        arg.set_item(&"rust_struct".to_string(),
+                     other_module::RustStruct::new().to_pyobject(vm),
+                     vm).expect("set_item");
+        init_fn2.call(vec!(arg.to_pyobject(vm)), vm).unwrap_or_else(|excp| {vm.print_exception(excp); panic!()});
     })
+}
+
+fn make_rust_module(vm: &VirtualMachine) -> PyObjectRef {
+    let module = rust_py_module::make_module(vm);
+    let ctx = &vm.ctx;
+
+    extend_module!(vm, module, {
+        "RustStruct" => other_module::RustStruct::make_class(ctx),
+    });
+    module
 }
 
 #[pymodule]
 mod rust_py_module {
+
+}
+
+mod other_module {
     use super::*;
     use rustpython::vm::{builtins::PyList, convert::ToPyObject, PyObjectRef};
-
-    #[pyfunction]
-    fn rust_function(
-        num: i32,
-        s: String,
-        python_person: PythonPerson,
-        _vm: &VirtualMachine,
-    ) -> PyResult<RustStruct> {
-        println!(
-            "Calling standalone rust function from python passing args:
-num: {},
-string: {},
-python_person.name: {}",
-            num, s, python_person.name
-        );
-        Ok(RustStruct {
-            numbers: NumVec(vec![1, 2, 3, 4]),
-        })
-    }
 
     #[derive(Debug, Clone)]
     struct NumVec(Vec<i32>);
@@ -62,34 +63,20 @@ python_person.name: {}",
         }
     }
 
-    #[pyattr]
-    #[pyclass(module = "rust_py_module", name = "RustStruct")]
+    #[pyclass(module = false, name = "RustStruct")]
     #[derive(Debug, PyPayload)]
-    struct RustStruct {
+    pub struct RustStruct {
+		#[allow(dead_code)]
         numbers: NumVec,
     }
 
     #[pyclass]
     impl RustStruct {
-        #[pygetset]
-        fn numbers(&self) -> NumVec {
-            self.numbers.clone()
-        }
-
-        #[pymethod]
-        fn print_in_rust_from_python(&self) {
-            println!("Calling a rust method from python");
+        pub fn new() -> RustStruct {
+            RustStruct {
+                numbers: NumVec(vec![1, 2, 3, 4]),
+            }
         }
     }
 
-    struct PythonPerson {
-        name: String,
-    }
-
-    impl<'a> TryFromBorrowedObject<'a> for PythonPerson {
-        fn try_from_borrowed_object(vm: &VirtualMachine, obj: &'a PyObject) -> PyResult<Self> {
-            let name = obj.get_attr("name", vm)?.try_into_value::<String>(vm)?;
-            Ok(PythonPerson { name })
-        }
-    }
 }
